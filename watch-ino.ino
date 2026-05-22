@@ -1,40 +1,41 @@
 /****************************************************************************
 
   Watch-ino
-  Smartwatch made with Arduino
+  Smartwatch made with ESP32
   [m-gonzalezm]
 
   -Specs-
-  Testing board: Arduino Uno R3
-  Display: OLED 0.96" 128x64
-  Software version: 0.1.2
-    + Implement power button and display timeout
-    Dev. beg 29.07.2024
-    Dev. end 30.07.2024
+  Testing board: ESP32-C3 SuperMini
+  Display: OLED 1.3" 128x64 I2C
+  RTC: Mini DS3231 I2C RTC
+  Software version: 0.1.3
+    + Change testing board
+    + Refactor the basecode to new architecture
+    + Update display and RTC module
+    ~ Change weekdays format
+    Dev. beg 21.05.2026
+    Dev. end 21.05.2026
 
   -Connections-
-  Pin   Component
-  02    Power button
-  A4    OLED SDA
-  A5    OLED SCL
+  Pin       Component
+  GPIO 02   Power button
+  GPIO 05   OLED SDA
+  GPIO 06   OLED SCL
 
 ****************************************************************************/
 
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <RTClib.h>
-
-#ifdef U8X8_HAVE_HW_I2C
 #include <Wire.h>
-#endif
 
-U8G2_SH1106_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
-RTC_DS1307 rtc;
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+RTC_DS3231 rtc;
 
 uint8_t timeout = 10;
 uint32_t secondsTimeout;
 char hour[9], date[17];
-const char * weekdays[] = { "Sun.", "Mon.", "Tues.", "Wed.", "Thurs.", "Fri.", "Sat." };
+const char * weekdays[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const char * months[] = { "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
 
 void draw() {
@@ -45,7 +46,8 @@ void draw() {
 }
 
 void setup() {
-  pinMode(2, INPUT);
+  pinMode(2, INPUT_PULLUP);
+  Wire.begin(5, 6);
   u8g2.begin();
   rtc.begin();
 }
@@ -55,13 +57,12 @@ void loop() {
   sprintf(hour, "%02d:%02d", dateTime.hour(), dateTime.minute());
   sprintf(date, "%s, %s %d", weekdays[dateTime.dayOfTheWeek()], months[dateTime.month() - 1], dateTime.day());
   
-  if (digitalRead(2)) secondsTimeout = dateTime.secondstime() + timeout;
+  if (!digitalRead(2)) secondsTimeout = dateTime.secondstime() + timeout;
 
   if (secondsTimeout >= dateTime.secondstime()) {
     u8g2.setPowerSave(0);
-    u8g2.firstPage();
-    do {
-      draw();
-    } while(u8g2.nextPage());
+    u8g2.clearBuffer();
+    draw();
+    u8g2.sendBuffer();
   } else u8g2.setPowerSave(1);
 }

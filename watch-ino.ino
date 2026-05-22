@@ -8,14 +8,10 @@
   Testing board: ESP32-C3 SuperMini
   Display: OLED 1.3" 128x64 I2C
   RTC: Mini DS3231 I2C RTC
-  Software version: 0.1.4
-    + Implement WiFi 2.4 connection
-    + Establish time-keeping hierarchy and fallback protocols
-    + Develop FreeRTOS scheduler for NTP fetch task
-    + Change code time source to internal POSIX timer
-    + Add WiFi status indicator to home screen
-    + Optimize loop function
-    Dev. beg 21.05.2026
+  Software version: 0.1.5
+    + Implement power toggle function using AceButton lib
+    + Add forced display refresh
+    Dev. beg 22.05.2026
     Dev. end 22.05.2026
 
   -Connections-
@@ -31,14 +27,20 @@
 #include <RTClib.h>
 #include <Wire.h>
 #include <esp_sntp.h>
+#include <AceButton.h>
 #include "WiFi.h"
 #include "credentials.h"
 
+using namespace ace_button;
+
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 RTC_DS3231 rtc;
+ButtonConfig buttonConfig;
+AceButton button(&buttonConfig, 2);
 
-uint8_t timeout = 10, lastHour = 0;
-uint32_t secondsTimeout, lastSecond = 0;
+uint8_t timeout = 10, lastSecond = 0, lastHour = 0;
+time_t secondsTimeout;
+bool forceDisplayRefresh = false;
 char hour[9], date[17];
 const char * weekdays[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const char * months[] = { "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
@@ -90,6 +92,22 @@ void autoSyncTask(void *param) {
   }
 }
 
+void handleButtonEvent(AceButton*, uint8_t event, uint8_t ) {
+  time_t now = time(NULL);
+  switch (event) {
+    case AceButton::kEventPressed:
+        if (secondsTimeout > now) {
+          secondsTimeout = now - 1;
+          u8g2.setPowerSave(1);
+        } else {
+          secondsTimeout = now + timeout;
+          u8g2.setPowerSave(0);
+          forceDisplayRefresh = true;
+        }
+        break;
+  }
+}
+
 void draw() {
   u8g2.setFont(u8g2_font_crox5h_tr);
   u8g2.drawStr((128 - u8g2.getStrWidth(hour)) / 2, 30, hour);
@@ -105,6 +123,7 @@ void setup() {
   Wire.begin(5, 6);
   u8g2.begin();
   rtc.begin();
+  buttonConfig.setEventHandler(handleButtonEvent);
   xTaskCreate(autoSyncTask, "Scheduled sync", 1536, NULL, 1, NULL);
 }
 
@@ -113,7 +132,8 @@ void loop() {
   struct tm internal;
   time(&now);
   localtime_r(&now, &internal);
-  if (internal.tm_sec != lastSecond) {
+  button.check();
+  if (internal.tm_sec != lastSecond || forceDisplayRefresh) {
     if (internal.tm_hour != lastHour) {
       lastHour = internal.tm_hour;
       Wire.beginTransmission(0x68);
@@ -128,13 +148,12 @@ void loop() {
     lastSecond = internal.tm_sec;
     sprintf(hour, "%02d:%02d", internal.tm_hour, internal.tm_min);
     sprintf(date, "%s, %s %d", weekdays[internal.tm_wday], months[internal.tm_mon], internal.tm_mday);
-    if (secondsTimeout >= now) {
+    if (secondsTimeout > now) {
       u8g2.setPowerSave(0);
       u8g2.clearBuffer();
       draw();
       u8g2.sendBuffer();
     } else u8g2.setPowerSave(1);
+    forceDisplayRefresh = false;
   }
-  
-  if (!digitalRead(2)) secondsTimeout = now + timeout;
 }

@@ -8,13 +8,15 @@
   Testing board: ESP32-C3 SuperMini
   Display: OLED 1.3" 128x64 I2C
   RTC: Mini DS3231 I2C RTC
-  Software version: 0.1.3
-    + Change testing board
-    + Refactor the basecode to new architecture
-    + Update display and RTC module
-    ~ Change weekdays format
+  Software version: 0.1.4
+    + Implement WiFi 2.4 connection
+    + Establish time-keeping hierarchy and fallback protocols
+    + Develop FreeRTOS scheduler for NTP fetch task
+    + Change code time source to internal POSIX timer
+    + Add WiFi status indicator to home screen
+    + Optimize loop function
     Dev. beg 21.05.2026
-    Dev. end 21.05.2026
+    Dev. end 22.05.2026
 
   -Connections-
   Pin       Component
@@ -28,21 +30,74 @@
 #include <U8g2lib.h>
 #include <RTClib.h>
 #include <Wire.h>
+#include <esp_sntp.h>
+#include "WiFi.h"
+#include "credentials.h"
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 RTC_DS3231 rtc;
 
-uint8_t timeout = 10;
-uint32_t secondsTimeout;
+uint8_t timeout = 10, lastHour = 0;
+uint32_t secondsTimeout, lastSecond = 0;
 char hour[9], date[17];
 const char * weekdays[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const char * months[] = { "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+
+const uint8_t STATUS_BITMAPS[][8] PROGMEM = {
+  { 0x00, 0x3e, 0x41, 0x1c, 0x22, 0x00, 0x08, 0x00 },
+};
+
+void syncDateTime(void *param) {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(SSID, PASSWD);
+  int timeout = 0;
+  while (WiFi.status() != WL_CONNECTED && timeout < 20) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    timeout++;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    configTzTime("CST6", "pool.ntp.org");
+    timeout = 0;
+    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && timeout < 10) {
+      vTaskDelay(pdMS_TO_TICKS(500));
+      timeout++;
+    }
+    if (sntp_get_sync_status() != SNTP_SYNC_STATUS_RESET)
+      rtc.adjust(DateTime(time(NULL)));
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    vTaskDelete(NULL);
+  }
+}
+
+void autoSyncTask(void *param) {
+  xTaskCreate(syncDateTime, "NTP", 4096, NULL, 2, NULL);
+  while (true) {
+    time_t now;
+    struct tm internal;
+    time(&now);
+    localtime_r(&now, &internal);
+    struct tm _internal = internal;
+    _internal.tm_hour = 3;
+    _internal.tm_min = 0;
+    _internal.tm_sec = 0;
+    time_t scheduled = mktime(&_internal);
+    if (now >= scheduled)
+      scheduled += 3600 * 24;
+    vTaskDelay(pdMS_TO_TICKS((scheduled - now) * 1000));
+    xTaskCreate(syncDateTime, "NTP fetch", 4096, NULL, 2, NULL);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+}
 
 void draw() {
   u8g2.setFont(u8g2_font_crox5h_tr);
   u8g2.drawStr((128 - u8g2.getStrWidth(hour)) / 2, 30, hour);
   u8g2.setFont(u8g2_font_crox1h_tr);
   u8g2.drawStr((128 - u8g2.getStrWidth(date)) / 2, 50, date);
+  if (WiFi.status() == WL_CONNECTED) {
+    u8g2.drawXBMP(120, 0, 8, 8, STATUS_BITMAPS[0]);
+  }
 }
 
 void setup() {
@@ -50,19 +105,36 @@ void setup() {
   Wire.begin(5, 6);
   u8g2.begin();
   rtc.begin();
+  xTaskCreate(autoSyncTask, "Scheduled sync", 1536, NULL, 1, NULL);
 }
 
 void loop() {
-  DateTime dateTime = rtc.now();
-  sprintf(hour, "%02d:%02d", dateTime.hour(), dateTime.minute());
-  sprintf(date, "%s, %s %d", weekdays[dateTime.dayOfTheWeek()], months[dateTime.month() - 1], dateTime.day());
+  time_t now;
+  struct tm internal;
+  time(&now);
+  localtime_r(&now, &internal);
+  if (internal.tm_sec != lastSecond) {
+    if (internal.tm_hour != lastHour) {
+      lastHour = internal.tm_hour;
+      Wire.beginTransmission(0x68);
+      if (!Wire.endTransmission()) {
+        if (!rtc.lostPower()) {
+          DateTime dateTime = rtc.now();
+          struct timeval updated = { .tv_sec = dateTime.unixtime() };
+          settimeofday(&updated, NULL);
+        }
+      }
+    }
+    lastSecond = internal.tm_sec;
+    sprintf(hour, "%02d:%02d", internal.tm_hour, internal.tm_min);
+    sprintf(date, "%s, %s %d", weekdays[internal.tm_wday], months[internal.tm_mon], internal.tm_mday);
+    if (secondsTimeout >= now) {
+      u8g2.setPowerSave(0);
+      u8g2.clearBuffer();
+      draw();
+      u8g2.sendBuffer();
+    } else u8g2.setPowerSave(1);
+  }
   
-  if (!digitalRead(2)) secondsTimeout = dateTime.secondstime() + timeout;
-
-  if (secondsTimeout >= dateTime.secondstime()) {
-    u8g2.setPowerSave(0);
-    u8g2.clearBuffer();
-    draw();
-    u8g2.sendBuffer();
-  } else u8g2.setPowerSave(1);
+  if (!digitalRead(2)) secondsTimeout = now + timeout;
 }

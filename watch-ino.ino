@@ -8,9 +8,11 @@
   Testing board: ESP32-C3 SuperMini
   Display: OLED 1.3" 128x64 I2C
   RTC: Mini DS3231 I2C RTC
-  Software version: 0.1.5
-    + Implement power toggle function using AceButton lib
-    + Add forced display refresh
+  Software version: 0.1.6
+    ! Fix syncDateTime critical errors
+    + Fix initial time values
+    + Modularize screen rendering
+    + Add provisional splash screen
     Dev. beg 22.05.2026
     Dev. end 22.05.2026
 
@@ -45,14 +47,27 @@ char hour[9], date[17];
 const char * weekdays[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const char * months[] = { "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
 
+enum {
+  SPLASH,
+  HOME,
+} screen = SPLASH;
+
 const uint8_t STATUS_BITMAPS[][8] PROGMEM = {
   { 0x00, 0x3e, 0x41, 0x1c, 0x22, 0x00, 0x08, 0x00 },
 };
 
+bool isRTCAvailable() {
+  Wire.beginTransmission(0x68);
+  if (!Wire.endTransmission())
+    if (!rtc.lostPower())
+      return true;
+  return false;
+}
+
 void syncDateTime(void *param) {
   WiFi.mode(WIFI_STA);
   WiFi.begin(SSID, PASSWD);
-  int timeout = 0;
+  uint8_t timeout = 0;
   while (WiFi.status() != WL_CONNECTED && timeout < 20) {
     vTaskDelay(pdMS_TO_TICKS(500));
     timeout++;
@@ -65,11 +80,17 @@ void syncDateTime(void *param) {
       timeout++;
     }
     if (sntp_get_sync_status() != SNTP_SYNC_STATUS_RESET)
-      rtc.adjust(DateTime(time(NULL)));
+      if (isRTCAvailable())
+        rtc.adjust(DateTime(time(NULL)));
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
-    vTaskDelete(NULL);
   }
+  if (screen == SPLASH) {
+    secondsTimeout = time(NULL) + 20 + timeout;
+    forceDisplayRefresh = true;
+    screen = HOME;
+  }
+  vTaskDelete(NULL);
 }
 
 void autoSyncTask(void *param) {
@@ -108,13 +129,29 @@ void handleButtonEvent(AceButton*, uint8_t event, uint8_t ) {
   }
 }
 
-void draw() {
+void drawSplash() {
+  u8g2.setFont(u8g2_font_crox5h_tr);
+  u8g2.drawStr((128 - u8g2.getStrWidth("watch-ino")) / 2, 40, "watch-ino");
+}
+
+void drawHome() {
   u8g2.setFont(u8g2_font_crox5h_tr);
   u8g2.drawStr((128 - u8g2.getStrWidth(hour)) / 2, 30, hour);
   u8g2.setFont(u8g2_font_crox1h_tr);
   u8g2.drawStr((128 - u8g2.getStrWidth(date)) / 2, 50, date);
   if (WiFi.status() == WL_CONNECTED) {
     u8g2.drawXBMP(120, 0, 8, 8, STATUS_BITMAPS[0]);
+  }
+}
+
+void draw() {
+  switch (screen) {
+    case SPLASH:
+      drawSplash();
+      break;
+    case HOME:
+      drawHome();
+      break;
   }
 }
 
@@ -125,6 +162,7 @@ void setup() {
   rtc.begin();
   buttonConfig.setEventHandler(handleButtonEvent);
   xTaskCreate(autoSyncTask, "Scheduled sync", 1536, NULL, 1, NULL);
+  secondsTimeout = time(NULL) + timeout;
 }
 
 void loop() {
@@ -136,13 +174,10 @@ void loop() {
   if (internal.tm_sec != lastSecond || forceDisplayRefresh) {
     if (internal.tm_hour != lastHour) {
       lastHour = internal.tm_hour;
-      Wire.beginTransmission(0x68);
-      if (!Wire.endTransmission()) {
-        if (!rtc.lostPower()) {
-          DateTime dateTime = rtc.now();
-          struct timeval updated = { .tv_sec = dateTime.unixtime() };
-          settimeofday(&updated, NULL);
-        }
+      if (isRTCAvailable()) {
+        DateTime dateTime = rtc.now();
+        struct timeval updated = { .tv_sec = dateTime.unixtime() };
+        settimeofday(&updated, NULL);
       }
     }
     lastSecond = internal.tm_sec;
